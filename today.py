@@ -109,23 +109,34 @@ def raise_request_error(operation_name, response):
 # Send one GraphQL request and normalize all failure cases in one place.
 # If a cache write is in progress, partial_cache lets us persist whatever was computed before raising.
 def graphql_request(operation_name, query, variables, partial_cache=None):
-    try:
-        response = requests.post(
-            GITHUB_GRAPHQL_URL,
-            json={"query": query, "variables": variables},
-            headers=HEADERS,
-            timeout=30,
-        )
-    except requests.RequestException as error:
-        if partial_cache is not None:
-            force_close_file(*partial_cache)
-        raise RuntimeError(f"{operation_name} request failed: {error}") from error
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                GITHUB_GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers=HEADERS,
+                timeout=30,
+            )
+        except requests.RequestException as error:
+            if attempt < 2:
+                import time
+                time.sleep(2)
+                continue
+            if partial_cache is not None:
+                force_close_file(*partial_cache)
+            raise RuntimeError(f"{operation_name} request failed: {error}") from error
 
-    # Non-200 responses are handled before trying to parse the body as GraphQL JSON.
-    if response.status_code != 200:
-        if partial_cache is not None:
-            force_close_file(*partial_cache)
-        raise_request_error(operation_name, response)
+        # Non-200 responses are handled before trying to parse the body as GraphQL JSON.
+        if response.status_code != 200:
+            if response.status_code >= 500 and attempt < 2:
+                import time
+                time.sleep(2)
+                continue
+            if partial_cache is not None:
+                force_close_file(*partial_cache)
+            raise_request_error(operation_name, response)
+            
+        break
 
     # GitHub can still return malformed data, so JSON parsing gets its own guarded error path.
     try:
